@@ -3,6 +3,7 @@ import socket, json
 HOST = ""
 PORT = 12345
 
+# sends a JSON object to a connection
 def send_obj(conn, obj):
     conn.sendall((json.dumps(obj) + "\n").encode("utf-8"))
 
@@ -16,7 +17,7 @@ def main():
 
     sock = socket.socket()
     sock.bind((HOST, PORT))
-    sock.listen(10)  
+    sock.listen(10)
 
     channels = {
         "main": {"users": [], "names": {}}
@@ -53,6 +54,11 @@ def main():
                     cmd = obj["command"]
                     args = obj.get("args", [])
                     user = users[conn]
+
+                    # fix added here: handle /connect command
+                    if cmd == "connect":
+                        send_obj(conn, {"type":"response","status":"ok","message":"Connected"})
+                        continue
 
                     # /nick
                     if cmd == "nick":
@@ -137,8 +143,9 @@ def main():
                     # /quit
                     elif cmd == "quit":
                         send_obj(conn, {"type":"response","status":"ok","message":"Goodbye"})
-                        return 
+                        return
 
+                    # unknown command
                     else:
                         send_obj(conn, {"type":"response","status":"error","message":"Unknown command"})
 
@@ -148,7 +155,6 @@ def main():
             channels[ch]["users"].remove(conn)
 
         del users[conn]
-
 
 if __name__ == "__main__":
     main()
