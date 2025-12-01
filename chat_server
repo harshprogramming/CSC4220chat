@@ -1,0 +1,181 @@
+import socket
+import threading
+import sys
+import time
+import signal
+
+MAX_THREADS = 4
+IDLE_TIMEOUT = 180  # 3 minutes
+
+clients = {}              # socket -> (thread, channel)
+channels = {}             # channel_id -> list of sockets
+lock = threading.Lock()
+
+last_activity = time.time()
+debug = 0
+running = True
+
+
+def log(msg):
+    if debug == 1:
+        print(f"[DEBUG] {msg}")
+
+
+def broadcast(channel, sender_sock, message):
+    """Send a message to all clients in the same channel."""
+    with lock:
+        if channel not in channels:
+            return
+        for sock in channels[channel]:
+            if sock != sender_sock:
+                try:
+                    sock.send(message.encode())
+                except:
+                    pass
+
+
+def remove_client(sock):
+    """Remove client from everything."""
+    with lock:
+        if sock in clients:
+            _, channel = clients[sock]
+            if channel in channels and sock in channels[channel]:
+                channels[channel].remove(sock)
+            del clients[sock]
+
+        try:
+            sock.close()
+        except:
+            pass
+
+
+def handle_client(sock, addr):
+    global last_activity
+    log(f"Client connected: {addr}")
+
+    # Default: no channel yet
+    clients[sock] = (threading.current_thread(), None)
+
+    try:
+        while running:
+            data = sock.recv(1024)
+            if not data:
+                break
+
+            last_activity = time.time()
+            msg = data.decode().strip()
+
+            if msg.lower() == "quit":
+                sock.send("Goodbye.\n".encode())
+                break
+
+            # JOIN command
+            if msg.startswith("JOIN"):
+                parts = msg.split()
+                if len(parts) != 2:
+                    sock.send("Usage: JOIN <channel_num>\n".encode())
+                    continue
+
+                try:
+                    channel = int(parts[1])
+                except:
+                    sock.send("Channel must be a number.\n".encode())
+                    continue
+
+                with lock:
+                    # Remove from old channel
+                    old_thread, old_channel = clients[sock]
+                    if old_channel is not None:
+                        channels[old_channel].remove(sock)
+
+                    # Add to new channel
+                    clients[sock] = (threading.current_thread(), channel)
+                    channels.setdefault(channel, []).append(sock)
+
+                sock.send(f"Joined channel {channel}\n".encode())
+                continue
+
+            # Normal message: broadcast within the client's channel
+            with lock:
+                _, channel = clients[sock]
+
+            if channel is None:
+                sock.send("You must join a channel first: JOIN <num>\n".encode())
+            else:
+                broadcast(channel, sock, f"[{addr}]: {msg}\n")
+
+    except:
+        pass
+
+    finally:
+        log(f"Client disconnected: {addr}")
+        remove_client(sock)
+
+
+def idle_watcher(server_socket):
+    global running
+    while running:
+        time.sleep(5)
+        if time.time() - last_activity > IDLE_TIMEOUT:
+            print("Idle timeout reached. Shutting down server.")
+            running = False
+            server_socket.close()
+            break
+
+
+def graceful_shutdown(signum, frame):
+    global running
+    print("\nShutting down server gracefully...")
+    running = False
+
+
+def main():
+    global debug, last_activity
+
+    if len(sys.argv) != 5:
+        print("Usage: python server.py -p <port> -d <debug-level>")
+        sys.exit(1)
+
+    if sys.argv[1] != "-p" or sys.argv[3] != "-d":
+        print("Usage: python server.py -p <port> -d <debug-level>")
+        sys.exit(1)
+
+    port = int(sys.argv[2])
+    debug = int(sys.argv[4])
+
+    signal.signal(signal.SIGINT, graceful_shutdown)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("0.0.0.0", port))
+    server.listen()
+
+    print(f"Server listening on port {port}")
+
+    # Start idle timeout watcher
+    threading.Thread(target=idle_watcher, args=(server,), daemon=True).start()
+
+    try:
+        while running:
+            try:
+                sock, addr = server.accept()
+            except:
+                break
+
+            last_activity = time.time()
+
+            with lock:
+                if len(clients) >= MAX_THREADS:
+                    sock.send("Server full (4 clients max).\n".encode())
+                    sock.close()
+                    continue
+
+            thread = threading.Thread(target=handle_client, args=(sock, addr))
+            thread.start()
+
+    finally:
+        print("Server shutting down...")
+        server.close()
+
+
+if __name__ == "__main__":
+    main()
